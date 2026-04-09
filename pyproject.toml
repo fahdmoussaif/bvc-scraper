@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bvc-scraper"
+version = "0.1.0"
+description = "Minimal Python scraper for the Casablanca Stock Exchange (Bourse de Casablanca)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Fahd" }
+]
+requires-python = ">=3.9"
+keywords = [
+    "casablanca",
+    "stock-exchange",
+    "morocco",
+    "finance",
+    "scraper",
+    "bvc",
+    "masi",
+    "bourse",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.28",
+    "urllib3>=1.26",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR-USERNAME/bvc-scraper"
+Repository = "https://github.com/YOUR-USERNAME/bvc-scraper"
+Issues = "https://github.com/YOUR-USERNAME/bvc-scraper/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bvc_scraper"]
