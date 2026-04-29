@@ -1,3 +1,22 @@
+"""
+bvc_scraper.py
+Minimal Casablanca Stock Exchange data scraper for the investing simulator.
+
+Returns plain Python types (dicts, lists, floats) ready for JSON serialization
+and database storage. No pandas, no formatting, no extras.
+
+Endpoints used:
+  1. /api/proxy/fr/api/bourse/dashboard/ticker
+        Returns ALL ~113 listed instruments in one request with current
+        price, OHLC, volume, sector, market cap, bid/ask. Primary source.
+
+  2. /api/proxy/fr/api/bourse_data/instrument_history
+        Returns historical OHLCV for one instrument by numeric symbol_id.
+
+  3. /_next/data/{build_id}/fr/live-market/marche-actions-listing.json
+        Used only to resolve ticker -> internal symbol_id. Slow; cache results.
+"""
+
 import json
 import logging
 import re
@@ -12,7 +31,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger(__name__)
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
 
 BASE = "https://www.casablanca-bourse.com"
 DASHBOARD_URL = f"{BASE}/api/proxy/fr/api/bourse/dashboard/ticker"
@@ -30,9 +51,12 @@ HEADERS = {
 TIMEOUT = 30
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _to_float(value: Any) -> Optional[float]:
+    """Best-effort conversion to float. Returns None for empty/invalid."""
     if value is None or value == "" or value == "-":
         return None
     try:
@@ -50,14 +74,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Build ID — required only for historical-data symbol resolution
+# ─────────────────────────────────────────────────────────────────────────────
 
 _build_id_cache: Dict[str, Any] = {"value": None, "fetched_at": 0.0}
 _BUILD_ID_TTL_SECONDS = 3600  # cache for 1 hour
 
 
 def get_build_id() -> Optional[str]:
-
+    """
+    Scrape the Next.js buildId from the BVC homepage. The buildId rotates
+    when the site is redeployed, so we cache it for an hour.
+    """
     now = time.time()
     if _build_id_cache["value"] and now - _build_id_cache["fetched_at"] < _BUILD_ID_TTL_SECONDS:
         return _build_id_cache["value"]
@@ -77,10 +106,17 @@ def get_build_id() -> Optional[str]:
     return None
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Live market data — all stocks in a single request
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_all_stocks() -> List[Dict[str, Any]]:
+    """
+    Fetch every equity instrument listed on the Casablanca Stock Exchange
+    with its current quote. Single HTTP request, ~1 second, complete.
 
+    Returns a list of dicts ready for JSON or DB storage.
+    """
     params = {"marche": 59, "class[]": [50]}
     try:
         r = requests.get(
@@ -103,6 +139,7 @@ def get_all_stocks() -> List[Dict[str, Any]]:
     for raw in rows:
         stocks.append({
             "ticker":          raw.get("ticker"),
+            "symbol_id":       _to_int(raw.get("field_symbol")),
             "name":            raw.get("label"),
             "sector":          raw.get("sous_secteur"),
             "status":          raw.get("field_etat_cot_val"),
@@ -128,7 +165,11 @@ def get_all_stocks() -> List[Dict[str, Any]]:
 
 
 def get_stock(ticker: str) -> Optional[Dict[str, Any]]:
-
+    """
+    Convenience: return one stock by ticker. Inefficient by itself
+    (re-fetches the full market) — in the backend, just query your DB
+    cache instead.
+    """
     ticker_u = ticker.upper()
     for s in get_all_stocks():
         if s["ticker"] and s["ticker"].upper() == ticker_u:
@@ -136,10 +177,15 @@ def get_stock(ticker: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Market summary — computed from get_all_stocks()
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_market_summary() -> Dict[str, Any]:
-
+    """
+    Aggregate market stats: gainers/losers count, average change,
+    total volume, total market capitalization.
+    """
     stocks = get_all_stocks()
     if not stocks:
         return {}
@@ -164,14 +210,26 @@ def get_market_summary() -> Dict[str, Any]:
     }
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Historical data
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_historical_data(
     symbol_id: int,
     from_date: str,
     to_date: str,
 ) -> List[Dict[str, Any]]:
+    """
+    Fetch historical OHLCV for one instrument.
 
+    `symbol_id` is the BVC internal numeric ID (drupal_internal__id),
+    NOT the ticker. Resolve once with resolve_symbol_id() then cache it
+    in your DB next to the ticker.
+
+    Dates are 'YYYY-MM-DD' strings.
+
+    Returns a list of dicts, oldest -> newest.
+    """
     headers = {
         **HEADERS,
         "Accept": "application/vnd.api+json",
@@ -249,10 +307,23 @@ def get_historical_data(
     return all_rows
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Symbol ID resolution (slow — call once per ticker, cache forever)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def resolve_symbol_id(ticker: str) -> Optional[int]:
+    """
+    Resolve ticker -> BVC internal numeric symbol_id, needed by
+    get_historical_data().
 
+    SLOW (~30s, makes one HTTP call per instrument). Call once per ticker
+    on first use, then store the result in your database alongside the
+    ticker. The mapping is stable.
+
+    NOTE: The underlying listing endpoint is paginated to 50 instruments,
+    so this currently only resolves stocks alphabetically up to ~M. For
+    later-alphabet tickers we will need a different approach (TODO).
+    """
     build_id = get_build_id()
     if not build_id:
         return None
@@ -309,4 +380,6 @@ def resolve_symbol_id(ticker: str) -> Optional[int]:
     return None
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Quick smoke test — `python bvc_scraper.py`
+# ─────────────────────────────────────────────────────────────────────────────
